@@ -10,8 +10,18 @@ import pytest
 from einops import rearrange
 
 from causal_conv1d.causal_conv1d_interface import causal_conv1d_fn, causal_conv1d_ref
-from causal_conv1d.causal_conv1d_interface import causal_conv1d_update, causal_conv1d_update_ref
-from causal_conv1d.causal_conv1d_varlen import causal_conv1d_varlen_states, causal_conv1d_varlen_states_ref
+from causal_conv1d.causal_conv1d_interface import (
+    causal_conv1d_update,
+    causal_conv1d_update_ref,
+)
+from causal_conv1d.causal_conv1d_varlen import (
+    causal_conv1d_varlen_states,
+    causal_conv1d_varlen_states_ref,
+)
+from causal_conv1d.causal_conv1d_varlen import (
+    causal_conv1d_varlen_fn,
+    causal_conv1d_varlen_ref,
+)
 
 
 def _max_abs_diff(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -31,14 +41,24 @@ def _conv1d_bwd_once(*, seed: int, channel_last: bool):
     if not channel_last:
         x = torch.randn(batch, dim, seqlen, device=device, dtype=itype).requires_grad_()
     else:
-        x = torch.randn(batch, seqlen, dim, device=device, dtype=itype).transpose(1, 2).requires_grad_()
-    weight = torch.randn(dim, width, device=device, dtype=torch.float32, requires_grad=True)
+        x = (
+            torch.randn(batch, seqlen, dim, device=device, dtype=itype)
+            .transpose(1, 2)
+            .requires_grad_()
+        )
+    weight = torch.randn(
+        dim, width, device=device, dtype=torch.float32, requires_grad=True
+    )
     bias = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
     g = torch.randn_like(x)
     out = causal_conv1d_fn(x, weight, bias, activation="silu")
     out.backward(g)
     torch.cuda.synchronize()
-    return x.grad.detach().clone(), weight.grad.detach().clone(), bias.grad.detach().clone()
+    return (
+        x.grad.detach().clone(),
+        weight.grad.detach().clone(),
+        bias.grad.detach().clone(),
+    )
 
 
 def _set_torch_deterministic(enabled: bool) -> bool:
@@ -62,13 +82,43 @@ def _set_torch_deterministic(enabled: bool) -> bool:
 @pytest.mark.parametrize("width", [2, 3, 4])
 # @pytest.mark.parametrize('width', [3])
 @pytest.mark.parametrize(
-    "seqlen", [1, 2, 8, 16, 32, 64, 128, 129, 130, 151, 256, 372, 512, 784, 1024, 1134, 2048, 4096]
+    "seqlen",
+    [
+        1,
+        2,
+        8,
+        16,
+        32,
+        64,
+        128,
+        129,
+        130,
+        151,
+        256,
+        372,
+        512,
+        784,
+        1024,
+        1134,
+        2048,
+        4096,
+    ],
 )
 # @pytest.mark.parametrize('seqlen', [8, 16, 32, 64, 128, 256, 512, 784, 1024, 2048, 4096])
 # @pytest.mark.parametrize('seqlen', [128])
-@pytest.mark.parametrize('dim', [64, 4096 + 32])
+@pytest.mark.parametrize("dim", [64, 4096 + 32])
 # @pytest.mark.parametrize('dim', [64])
-def test_causal_conv1d(dim, seqlen, width, has_bias, silu_activation, itype, channel_last, has_initial_states, return_final_states):
+def test_causal_conv1d(
+    dim,
+    seqlen,
+    width,
+    has_bias,
+    silu_activation,
+    itype,
+    channel_last,
+    has_initial_states,
+    return_final_states,
+):
     if not channel_last and (has_initial_states or return_final_states):
         pytest.skip("Only channel_last support initial_states or return_final_states")
     device = "cuda"
@@ -81,33 +131,65 @@ def test_causal_conv1d(dim, seqlen, width, has_bias, silu_activation, itype, cha
     batch = 2
     # batch = 1
     if not channel_last:
-        x = torch.randn(batch, 4096 + dim + 64, seqlen, device=device, dtype=itype)[:, 4096:4096 + dim, :].requires_grad_()
+        x = torch.randn(batch, 4096 + dim + 64, seqlen, device=device, dtype=itype)[
+            :, 4096 : 4096 + dim, :
+        ].requires_grad_()
     else:
         x = rearrange(
-            torch.randn(batch, seqlen, 4096 + dim + 64, device=device, dtype=itype)[:, :, 4096:4096 + dim], "b s d -> b d s"
+            torch.randn(batch, seqlen, 4096 + dim + 64, device=device, dtype=itype)[
+                :, :, 4096 : 4096 + dim
+            ],
+            "b s d -> b d s",
         ).requires_grad_()
-    weight = torch.randn(dim, width, device=device, dtype=torch.float32, requires_grad=True)
+    weight = torch.randn(
+        dim, width, device=device, dtype=torch.float32, requires_grad=True
+    )
     if has_bias:
         bias = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
     else:
         bias = None
     if has_initial_states:
-        initial_states = torch.randn(batch, width - 1, dim, device=device, dtype=itype).transpose(1, 2).requires_grad_()
+        initial_states = (
+            torch.randn(batch, width - 1, dim, device=device, dtype=itype)
+            .transpose(1, 2)
+            .requires_grad_()
+        )
     else:
         initial_states = None
     x_ref = x.detach().clone().requires_grad_()
     weight_ref = weight.detach().clone().requires_grad_()
     bias_ref = bias.detach().clone().requires_grad_() if bias is not None else None
-    initial_states_ref = initial_states.detach().clone().requires_grad_() if initial_states is not None else None
+    initial_states_ref = (
+        initial_states.detach().clone().requires_grad_()
+        if initial_states is not None
+        else None
+    )
     activation = None if not silu_activation else "silu"
-    out = causal_conv1d_fn(x, weight, bias, initial_states=initial_states, return_final_states=return_final_states,
-                           activation=activation)
-    out_ref = causal_conv1d_ref(x_ref, weight_ref, bias_ref, initial_states=initial_states_ref, return_final_states=return_final_states, activation=activation)
+    out = causal_conv1d_fn(
+        x,
+        weight,
+        bias,
+        initial_states=initial_states,
+        return_final_states=return_final_states,
+        activation=activation,
+    )
+    out_ref = causal_conv1d_ref(
+        x_ref,
+        weight_ref,
+        bias_ref,
+        initial_states=initial_states_ref,
+        return_final_states=return_final_states,
+        activation=activation,
+    )
     if return_final_states:
         out, final_states = out
         out_ref, final_states_ref = out_ref
-        print(f"Final states max diff: {(final_states - final_states_ref).abs().max().item()}")
-        print(f"Final states mean diff: {(final_states - final_states_ref).abs().mean().item()}")
+        print(
+            f"Final states max diff: {(final_states - final_states_ref).abs().max().item()}"
+        )
+        print(
+            f"Final states mean diff: {(final_states - final_states_ref).abs().mean().item()}"
+        )
         assert torch.allclose(final_states, final_states_ref, rtol=rtol, atol=atol)
 
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
@@ -127,14 +209,21 @@ def test_causal_conv1d(dim, seqlen, width, has_bias, silu_activation, itype, cha
     if has_bias:
         print(f"dbias max diff: {(bias.grad - bias_ref.grad).abs().max().item()}")
     if has_initial_states:
-        print(f"dinitial_states max diff: {(initial_states.grad - initial_states_ref.grad).abs().max().item()}")
+        print(
+            f"dinitial_states max diff: {(initial_states.grad - initial_states_ref.grad).abs().max().item()}"
+        )
 
     assert torch.allclose(x.grad, x_ref.grad.to(dtype=itype), rtol=rtol, atol=atol)
     assert torch.allclose(weight.grad, weight_ref.grad, rtol=rtolw, atol=atolw)
     if has_bias:
         assert torch.allclose(bias.grad, bias_ref.grad, rtol=rtolw, atol=atolw)
     if has_initial_states:
-        assert torch.allclose(initial_states.grad, initial_states_ref.grad.to(dtype=itype), rtol=rtol, atol=atol)
+        assert torch.allclose(
+            initial_states.grad,
+            initial_states_ref.grad.to(dtype=itype),
+            rtol=rtol,
+            atol=atol,
+        )
 
 
 @pytest.mark.parametrize("itype", [torch.float32, torch.float16, torch.bfloat16])
@@ -151,7 +240,9 @@ def test_causal_conv1d(dim, seqlen, width, has_bias, silu_activation, itype, cha
 # @pytest.mark.parametrize('width', [4])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 # @pytest.mark.parametrize("dim", [2048])
-def test_causal_conv1d_update(dim, width, seqlen, has_cache_seqlens, has_bias, silu_activation, itype):
+def test_causal_conv1d_update(
+    dim, width, seqlen, has_cache_seqlens, has_bias, silu_activation, itype
+):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
@@ -164,23 +255,40 @@ def test_causal_conv1d_update(dim, width, seqlen, has_cache_seqlens, has_bias, s
     # dim = 64
     x = torch.randn(batch, seqlen, dim, device=device, dtype=itype).transpose(-1, -2)
     state_len = torch.randint(width - 1, width + 10, (1,)).item()
-    conv_state = torch.randn(batch, state_len, dim, device=device, dtype=itype).transpose(-1, -2)
-    weight = torch.randn(dim, width, device=device, dtype=torch.float32, requires_grad=True)
+    conv_state = torch.randn(
+        batch, state_len, dim, device=device, dtype=itype
+    ).transpose(-1, -2)
+    weight = torch.randn(
+        dim, width, device=device, dtype=torch.float32, requires_grad=True
+    )
     if has_bias:
         bias = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
     else:
         bias = None
     conv_state_ref = conv_state.detach().clone()
     activation = None if not silu_activation else "silu"
-    cache_seqlens = (torch.randint(0, 1024, (batch,), dtype=torch.int32, device=device)
-                     if has_cache_seqlens else None)
-    out = causal_conv1d_update(x, conv_state, weight, bias, activation=activation, cache_seqlens=cache_seqlens)
-    out_ref = causal_conv1d_update_ref(x, conv_state_ref, weight, bias, activation=activation, cache_seqlens=cache_seqlens)
+    cache_seqlens = (
+        torch.randint(0, 1024, (batch,), dtype=torch.int32, device=device)
+        if has_cache_seqlens
+        else None
+    )
+    out = causal_conv1d_update(
+        x, conv_state, weight, bias, activation=activation, cache_seqlens=cache_seqlens
+    )
+    out_ref = causal_conv1d_update_ref(
+        x,
+        conv_state_ref,
+        weight,
+        bias,
+        activation=activation,
+        cache_seqlens=cache_seqlens,
+    )
 
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
     assert torch.equal(conv_state, conv_state_ref)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
+
 
 @pytest.mark.parametrize("itype", [torch.float32, torch.float16, torch.bfloat16])
 # @pytest.mark.parametrize('itype', [torch.float16])
@@ -196,7 +304,9 @@ def test_causal_conv1d_update(dim, width, seqlen, has_cache_seqlens, has_bias, s
 # @pytest.mark.parametrize('width', [4])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 # @pytest.mark.parametrize("dim", [2048])
-def test_causal_conv1d_update_with_batch_gather(dim, width, seqlen, has_cache_seqlens, has_bias, silu_activation, itype):
+def test_causal_conv1d_update_with_batch_gather(
+    dim, width, seqlen, has_cache_seqlens, has_bias, silu_activation, itype
+):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
@@ -211,21 +321,44 @@ def test_causal_conv1d_update_with_batch_gather(dim, width, seqlen, has_cache_se
     state_len = torch.randint(width - 1, width + 10, (1,)).item()
 
     total_entries = 10 * batch
-    conv_state = torch.randn(total_entries, state_len, dim, device=device, dtype=itype).transpose(-1, -2)
-    conv_state_indices = torch.randperm(total_entries)[:batch].to(dtype=torch.int32, device=device)
+    conv_state = torch.randn(
+        total_entries, state_len, dim, device=device, dtype=itype
+    ).transpose(-1, -2)
+    conv_state_indices = torch.randperm(total_entries)[:batch].to(
+        dtype=torch.int32, device=device
+    )
 
-    weight = torch.randn(dim, width, device=device, dtype=torch.float32, requires_grad=True)
+    weight = torch.randn(
+        dim, width, device=device, dtype=torch.float32, requires_grad=True
+    )
     if has_bias:
         bias = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
     else:
         bias = None
     conv_state_ref = conv_state[conv_state_indices, :].detach().clone()
     activation = None if not silu_activation else "silu"
-    cache_seqlens = (torch.randint(0, 1024, (batch,), dtype=torch.int32, device=device)
-                     if has_cache_seqlens else None)
-    out = causal_conv1d_update(x, conv_state, weight, bias, activation=activation,
-                               cache_seqlens=cache_seqlens, conv_state_indices=conv_state_indices)
-    out_ref = causal_conv1d_update_ref(x, conv_state_ref, weight, bias, activation=activation, cache_seqlens=cache_seqlens)
+    cache_seqlens = (
+        torch.randint(0, 1024, (batch,), dtype=torch.int32, device=device)
+        if has_cache_seqlens
+        else None
+    )
+    out = causal_conv1d_update(
+        x,
+        conv_state,
+        weight,
+        bias,
+        activation=activation,
+        cache_seqlens=cache_seqlens,
+        conv_state_indices=conv_state_indices,
+    )
+    out_ref = causal_conv1d_update_ref(
+        x,
+        conv_state_ref,
+        weight,
+        bias,
+        activation=activation,
+        cache_seqlens=cache_seqlens,
+    )
 
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
@@ -239,7 +372,7 @@ def test_causal_conv1d_update_with_batch_gather(dim, width, seqlen, has_cache_se
 # @pytest.mark.parametrize('silu_activation', [True])
 @pytest.mark.parametrize("has_bias", [False, True])
 # @pytest.mark.parametrize('has_bias', [True])
-@pytest.mark.parametrize("has_cache_seqlens", [False])#, True])
+@pytest.mark.parametrize("has_cache_seqlens", [False])  # , True])
 # @pytest.mark.parametrize('has_cache_seqlens', [True])
 @pytest.mark.parametrize("seqlen", [1, 4, 5])
 # @pytest.mark.parametrize('seqlen', [4])
@@ -247,7 +380,9 @@ def test_causal_conv1d_update_with_batch_gather(dim, width, seqlen, has_cache_se
 # @pytest.mark.parametrize('width', [4])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 # @pytest.mark.parametrize("dim", [2048])
-def test_causal_conv1d_update_with_padding(dim, width, seqlen, has_cache_seqlens, has_bias, silu_activation, itype):
+def test_causal_conv1d_update_with_padding(
+    dim, width, seqlen, has_cache_seqlens, has_bias, silu_activation, itype
+):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
@@ -259,7 +394,9 @@ def test_causal_conv1d_update_with_padding(dim, width, seqlen, has_cache_seqlens
     state_len = torch.randint(width - 1, width + 10, (1,)).item()
 
     total_entries = 10 * batch
-    conv_state = torch.randn(total_entries, state_len, dim, device=device, dtype=itype).transpose(-1, -2)
+    conv_state = torch.randn(
+        total_entries, state_len, dim, device=device, dtype=itype
+    ).transpose(-1, -2)
 
     # Introduce padding by setting some indices to -1
     num_valid_requests = batch // 2
@@ -280,15 +417,22 @@ def test_causal_conv1d_update_with_padding(dim, width, seqlen, has_cache_seqlens
 
     has_cache_seqlens = False
     cache_seqlens = None
-    #cache_seqlens = (torch.randint(0, 1024, (batch,), dtype=torch.int32, device=device)
+    # cache_seqlens = (torch.randint(0, 1024, (batch,), dtype=torch.int32, device=device)
     #                 if has_cache_seqlens else None)
 
     # Clone original state for later comparison
     conv_state_original = conv_state.clone()
 
     # Run the main function with padded indices
-    out = causal_conv1d_update(x, conv_state, weight, bias, activation=activation,
-                               cache_seqlens=cache_seqlens, conv_state_indices=conv_state_indices)
+    out = causal_conv1d_update(
+        x,
+        conv_state,
+        weight,
+        bias,
+        activation=activation,
+        cache_seqlens=cache_seqlens,
+        conv_state_indices=conv_state_indices,
+    )
 
     # Manually compute the reference output and expected final state
     out_ref = torch.zeros_like(out)
@@ -300,15 +444,22 @@ def test_causal_conv1d_update_with_padding(dim, width, seqlen, has_cache_seqlens
         x_valid = x[valid_mask]
         conv_state_indices_valid = conv_state_indices[valid_mask]
         # This will be modified in-place by the ref function to get the expected updated state
-        conv_state_valid_updated = conv_state_original[conv_state_indices_valid, :].detach().clone()
+        conv_state_valid_updated = (
+            conv_state_original[conv_state_indices_valid, :].detach().clone()
+        )
         cache_seqlens_valid = cache_seqlens[valid_mask] if has_cache_seqlens else None
 
-        out_ref_valid = causal_conv1d_update_ref(x_valid, conv_state_valid_updated, weight, bias,
-                                                 activation=activation, cache_seqlens=cache_seqlens_valid)
+        out_ref_valid = causal_conv1d_update_ref(
+            x_valid,
+            conv_state_valid_updated,
+            weight,
+            bias,
+            activation=activation,
+            cache_seqlens=cache_seqlens_valid,
+        )
         out_ref[valid_mask] = out_ref_valid
         # Place the updated states into our expected full state tensor
         conv_state_expected[conv_state_indices_valid] = conv_state_valid_updated
-
 
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
@@ -340,22 +491,25 @@ def test_causal_conv1d_get_states(dim, itype):
 
 
 # @pytest.mark.parametrize("channel_last", [False, True])
-@pytest.mark.parametrize('channel_last', [True])
+@pytest.mark.parametrize("channel_last", [True])
 # @pytest.mark.parametrize("itype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize('itype', [torch.bfloat16])
+@pytest.mark.parametrize("itype", [torch.bfloat16])
 # @pytest.mark.parametrize("silu_activation", [False, True])
-@pytest.mark.parametrize('silu_activation', [True])
+@pytest.mark.parametrize("silu_activation", [True])
 # @pytest.mark.parametrize("has_bias", [False, True])
-@pytest.mark.parametrize('has_bias', [True])
+@pytest.mark.parametrize("has_bias", [True])
 # @pytest.mark.parametrize("width", [2, 3, 4])
-@pytest.mark.parametrize('width', [4])
+@pytest.mark.parametrize("width", [4])
 @pytest.mark.parametrize(
     # "seqlen", [8, 16, 32, 64, 128, 151, 256, 372, 512, 784, 1024, 1134, 2048, 4096]
-    "seqlen", [2048]
+    "seqlen",
+    [2048],
 )
 # @pytest.mark.parametrize('seqlen', [8, 16, 32, 64, 128, 256, 512, 784, 1024, 2048, 4096])
 # @pytest.mark.parametrize('seqlen', [128])
-def test_causal_conv1d_race_condition(seqlen, width, has_bias, silu_activation, itype, channel_last):
+def test_causal_conv1d_race_condition(
+    seqlen, width, has_bias, silu_activation, itype, channel_last
+):
     device = "cuda"
     # set seed
     torch.random.manual_seed(0)
@@ -364,12 +518,19 @@ def test_causal_conv1d_race_condition(seqlen, width, has_bias, silu_activation, 
     dim = 4096 + 32  # Try dim not divisible by 64
     # dim = 64
     if not channel_last:
-        x = torch.randn(batch, 4096 + dim + 64, seqlen, device=device, dtype=itype)[:, 4096:4096 + dim, :].requires_grad_()
+        x = torch.randn(batch, 4096 + dim + 64, seqlen, device=device, dtype=itype)[
+            :, 4096 : 4096 + dim, :
+        ].requires_grad_()
     else:
         x = rearrange(
-            torch.randn(batch, seqlen, 4096 + dim + 64, device=device, dtype=itype)[:, :, 4096:4096 + dim], "b s d -> b d s"
+            torch.randn(batch, seqlen, 4096 + dim + 64, device=device, dtype=itype)[
+                :, :, 4096 : 4096 + dim
+            ],
+            "b s d -> b d s",
         ).requires_grad_()
-    weight = torch.randn(dim, width, device=device, dtype=torch.float32, requires_grad=True)
+    weight = torch.randn(
+        dim, width, device=device, dtype=torch.float32, requires_grad=True
+    )
     if has_bias:
         bias = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
     else:
@@ -411,7 +572,7 @@ def test_causal_conv1d_race_condition(seqlen, width, has_bias, silu_activation, 
 )
 # @pytest.mark.parametrize('seqlen', [8, 16, 32, 64, 128, 256, 512, 784, 1024, 2048, 4096])
 # @pytest.mark.parametrize('seqlen', [2048])
-@pytest.mark.parametrize('dim', [64, 4096 + 32])
+@pytest.mark.parametrize("dim", [64, 4096 + 32])
 # @pytest.mark.parametrize('dim', [64])
 def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation, itype):
     device = "cuda"
@@ -426,20 +587,40 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation, ity
     for b in range(batch):
         nsplits = torch.randint(1, 5, (1,)).item()
         eos_pos = torch.randperm(seqlen - 1)[:nsplits].sort().values
-        seqlens.append(torch.diff(torch.cat([torch.tensor([-1]), eos_pos, torch.tensor([seqlen - 1])])).tolist())
+        seqlens.append(
+            torch.diff(
+                torch.cat([torch.tensor([-1]), eos_pos, torch.tensor([seqlen - 1])])
+            ).tolist()
+        )
         assert sum(seqlens[-1]) == seqlen
         assert all(s > 0 for s in seqlens[-1])
     # Only support channel_last
     x = rearrange(
-        torch.randn(batch, seqlen, 4096 + dim + 64, device=device, dtype=itype)[:, :, 4096:4096 + dim], "b s d -> b d s"
+        torch.randn(batch, seqlen, 4096 + dim + 64, device=device, dtype=itype)[
+            :, :, 4096 : 4096 + dim
+        ],
+        "b s d -> b d s",
     ).requires_grad_()
-    weight = torch.randn(dim, width, device=device, dtype=torch.float32, requires_grad=True)
+    weight = torch.randn(
+        dim, width, device=device, dtype=torch.float32, requires_grad=True
+    )
     if has_bias:
         bias = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
     else:
         bias = None
-    seq_idx = torch.stack([torch.cat([torch.full((s,), i, dtype=torch.int32, device=device) for i, s in enumerate(sl)], dim=0)
-                           for sl in seqlens], dim=0)
+    seq_idx = torch.stack(
+        [
+            torch.cat(
+                [
+                    torch.full((s,), i, dtype=torch.int32, device=device)
+                    for i, s in enumerate(sl)
+                ],
+                dim=0,
+            )
+            for sl in seqlens
+        ],
+        dim=0,
+    )
     x_ref = x.detach().clone().requires_grad_()
     weight_ref = weight.detach().clone().requires_grad_()
     bias_ref = bias.detach().clone().requires_grad_() if bias is not None else None
@@ -449,7 +630,9 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation, ity
     for b in range(batch):
         out_ref_b = []
         for x_s in torch.split(x_ref[[b]], seqlens[b], dim=2):
-            out_ref_b.append(causal_conv1d_ref(x_s, weight_ref, bias_ref, activation=activation))
+            out_ref_b.append(
+                causal_conv1d_ref(x_s, weight_ref, bias_ref, activation=activation)
+            )
         out_ref.append(torch.cat(out_ref_b, dim=2))
     out_ref = torch.cat(out_ref, dim=0)
 
@@ -471,6 +654,7 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation, ity
     if has_bias:
         assert torch.allclose(bias.grad, bias_ref.grad, rtol=rtolw, atol=atolw)
 
+
 @pytest.mark.parametrize("itype", [torch.float32, torch.float16, torch.bfloat16])
 # @pytest.mark.parametrize('itype', [torch.bfloat16])
 @pytest.mark.parametrize("silu_activation", [False, True])
@@ -479,13 +663,13 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation, ity
 # @pytest.mark.parametrize('has_bias', [True])
 @pytest.mark.parametrize("width", [2, 3, 4])
 # @pytest.mark.parametrize('width', [4])
-@pytest.mark.parametrize(
-    "seqlen", [128, 256, 512, 1024]
-)
+@pytest.mark.parametrize("seqlen", [128, 256, 512, 1024])
 # @pytest.mark.parametrize('seqlen', [128])
-@pytest.mark.parametrize('dim', [64, 4096 + 32])
+@pytest.mark.parametrize("dim", [64, 4096 + 32])
 # @pytest.mark.parametrize('dim', [64])
-def test_causal_conv1d_varlen_padding(dim, seqlen, width, has_bias, silu_activation, itype):
+def test_causal_conv1d_varlen_padding(
+    dim, seqlen, width, has_bias, silu_activation, itype
+):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
@@ -497,25 +681,41 @@ def test_causal_conv1d_varlen_padding(dim, seqlen, width, has_bias, silu_activat
     max_seqlen = seqlen
 
     # Generate sequences of varying lengths for each batch item, some shorter than max_seqlen
-    true_seqlens = [torch.randint(max_seqlen // 2, max_seqlen + 1, (1,)).item() for _ in range(batch)]
+    true_seqlens = [
+        torch.randint(max_seqlen // 2, max_seqlen + 1, (1,)).item()
+        for _ in range(batch)
+    ]
 
     seqlens = []
     for b in range(batch):
         # Within each true sequence, we can have multiple sub-sequences
         nsplits = torch.randint(1, 4, (1,)).item()
         eos_pos = torch.randperm(true_seqlens[b] - 1)[:nsplits].sort().values
-        sl = torch.diff(torch.cat([torch.tensor([-1]), eos_pos, torch.tensor([true_seqlens[b] - 1])])).tolist()
+        sl = torch.diff(
+            torch.cat(
+                [torch.tensor([-1]), eos_pos, torch.tensor([true_seqlens[b] - 1])]
+            )
+        ).tolist()
         seqlens.append(sl)
         assert sum(sl) == true_seqlens[b]
         assert all(s > 0 for s in sl)
 
     # Only support channel_last
     x = rearrange(
-        torch.randn(batch, max_seqlen, 4096 + dim + 64, device=device, dtype=itype)[:, :, 4096:4096 + dim], "b s d -> b d s"
+        torch.randn(batch, max_seqlen, 4096 + dim + 64, device=device, dtype=itype)[
+            :, :, 4096 : 4096 + dim
+        ],
+        "b s d -> b d s",
     ).requires_grad_()
 
-    weight = torch.randn(dim, width, device=device, dtype=torch.float32, requires_grad=True)
-    bias = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True) if has_bias else None
+    weight = torch.randn(
+        dim, width, device=device, dtype=torch.float32, requires_grad=True
+    )
+    bias = (
+        torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
+        if has_bias
+        else None
+    )
 
     # Construct seq_idx with -1 for padding
     seq_idx_list = []
@@ -523,13 +723,23 @@ def test_causal_conv1d_varlen_padding(dim, seqlen, width, has_bias, silu_activat
     for b in range(batch):
         seq_idx_b = []
         for s in seqlens[b]:
-            seq_idx_b.append(torch.full((s,), conv_batch_idx_counter, dtype=torch.int32, device=device))
+            seq_idx_b.append(
+                torch.full(
+                    (s,), conv_batch_idx_counter, dtype=torch.int32, device=device
+                )
+            )
             conv_batch_idx_counter += 1
         seq_idx_b = torch.cat(seq_idx_b, dim=0)
         # Add padding indices
         padding_len = max_seqlen - true_seqlens[b]
         assert padding_len > 0
-        seq_idx_b = torch.cat([seq_idx_b, torch.full((padding_len,), -1, dtype=torch.int32, device=device)], dim=0)
+        seq_idx_b = torch.cat(
+            [
+                seq_idx_b,
+                torch.full((padding_len,), -1, dtype=torch.int32, device=device),
+            ],
+            dim=0,
+        )
         seq_idx_list.append(seq_idx_b)
     seq_idx = torch.stack(seq_idx_list, dim=0)
 
@@ -546,11 +756,13 @@ def test_causal_conv1d_varlen_padding(dim, seqlen, width, has_bias, silu_activat
     for b in range(batch):
         out_ref_b = []
         # We only process the true sequence part
-        x_b_unpadded = x_ref[[b], :, :true_seqlens[b]]
+        x_b_unpadded = x_ref[[b], :, : true_seqlens[b]]
         # Split into sub-sequences
         for x_s in torch.split(x_b_unpadded, seqlens[b], dim=2):
-            out_ref_b.append(causal_conv1d_ref(x_s, weight_ref, bias_ref, activation=activation))
-        out_ref[b, :, :true_seqlens[b]] = torch.cat(out_ref_b, dim=2)
+            out_ref_b.append(
+                causal_conv1d_ref(x_s, weight_ref, bias_ref, activation=activation)
+            )
+        out_ref[b, :, : true_seqlens[b]] = torch.cat(out_ref_b, dim=2)
 
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
@@ -564,7 +776,9 @@ def test_causal_conv1d_bwd_deterministic_reproducible(channel_last: bool, monkey
     old = _set_torch_deterministic(True)
     try:
         runs = 5
-        outs = [_conv1d_bwd_once(seed=123, channel_last=channel_last) for _ in range(runs)]
+        outs = [
+            _conv1d_bwd_once(seed=123, channel_last=channel_last) for _ in range(runs)
+        ]
         dx0, dw0, db0 = outs[0]
         for i in range(1, runs):
             dx, dw, db = outs[i]
@@ -577,7 +791,9 @@ def test_causal_conv1d_bwd_deterministic_reproducible(channel_last: bool, monkey
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("channel_last", [False, True])
-def test_causal_conv1d_bwd_deterministic_close_to_default(channel_last: bool, monkeypatch):
+def test_causal_conv1d_bwd_deterministic_close_to_default(
+    channel_last: bool, monkeypatch
+):
     default_runs = 3
     monkeypatch.delenv("CAUSAL_CONV1D_DETERMINISTIC", raising=False)
     old = _set_torch_deterministic(True)
@@ -585,7 +801,9 @@ def test_causal_conv1d_bwd_deterministic_close_to_default(channel_last: bool, mo
         dx_det, dw_det, db_det = _conv1d_bwd_once(seed=123, channel_last=channel_last)
         torch.use_deterministic_algorithms(False)
         for _ in range(default_runs):
-            dx_def, dw_def, db_def = _conv1d_bwd_once(seed=123, channel_last=channel_last)
+            dx_def, dw_def, db_def = _conv1d_bwd_once(
+                seed=123, channel_last=channel_last
+            )
             assert torch.allclose(dx_det, dx_def, rtol=1e-2, atol=5e-2)
             assert torch.allclose(dw_det, dw_def, rtol=1e-3, atol=1e-3)
             assert torch.allclose(db_det, db_def, rtol=1e-3, atol=1e-3)
@@ -595,7 +813,9 @@ def test_causal_conv1d_bwd_deterministic_close_to_default(channel_last: bool, mo
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("channel_last", [False, True])
-def test_causal_conv1d_bwd_default_mode_is_not_reproducible(channel_last: bool, monkeypatch):
+def test_causal_conv1d_bwd_default_mode_is_not_reproducible(
+    channel_last: bool, monkeypatch
+):
     monkeypatch.delenv("CAUSAL_CONV1D_DETERMINISTIC", raising=False)
     old = _set_torch_deterministic(False)
     try:
@@ -609,10 +829,346 @@ def test_causal_conv1d_bwd_default_mode_is_not_reproducible(channel_last: bool, 
             if dw0 is None:
                 dx0, dw0, db0 = dx, dw, db
                 continue
-            if _max_abs_diff(dx0, dx) != 0.0 or _max_abs_diff(dw0, dw) != 0.0 or _max_abs_diff(db0, db) != 0.0:
+            if (
+                _max_abs_diff(dx0, dx) != 0.0
+                or _max_abs_diff(dw0, dw) != 0.0
+                or _max_abs_diff(db0, db) != 0.0
+            ):
                 observed = True
                 break
         if not observed:
-            pytest.xfail("Did not observe nondeterminism in default mode (may be GPU/runtime dependent).")
+            pytest.xfail(
+                "Did not observe nondeterminism in default mode (may be GPU/runtime dependent)."
+            )
     finally:
         torch.use_deterministic_algorithms(old)
+
+
+# ---------------------------------------------------------------------------
+# Tests for causal_conv1d_varlen_fn (packed variable-length sequences)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("itype", [torch.float32, torch.float16, torch.bfloat16])
+# @pytest.mark.parametrize('itype', [torch.float32])
+@pytest.mark.parametrize("silu_activation", [False, True])
+# @pytest.mark.parametrize('silu_activation', [False])
+@pytest.mark.parametrize("has_bias", [False, True])
+# @pytest.mark.parametrize('has_bias', [True])
+@pytest.mark.parametrize("width", [2, 3, 4])
+# @pytest.mark.parametrize('width', [4])
+@pytest.mark.parametrize("seqlen", [8, 16, 32, 64, 128, 256, 512, 1024])
+# @pytest.mark.parametrize('seqlen', [64])
+@pytest.mark.parametrize("dim", [64, 4096 + 32])
+# @pytest.mark.parametrize('dim', [64])
+def test_causal_conv1d_varlen_packed_fwd(
+    dim, seqlen, width, has_bias, silu_activation, itype
+):
+    """Test forward pass of the packed varlen conv1d against per-segment reference."""
+    device = "cuda"
+    rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
+    if itype == torch.bfloat16:
+        rtol, atol = 1e-2, 5e-2
+
+    torch.random.manual_seed(seqlen + dim + width)
+    batch = 5
+    # Generate random sequence lengths that sum to roughly `seqlen * batch`
+    # but with variable lengths per sequence
+    seqlens_list = []
+    remaining = seqlen
+    for _ in range(batch - 1):
+        sl = torch.randint(
+            1, max(2, remaining - (batch - len(seqlens_list) - 1)), (1,)
+        ).item()
+        seqlens_list.append(sl)
+        remaining -= sl
+    seqlens_list.append(remaining)
+    assert all(s > 0 for s in seqlens_list)
+    total_tokens = sum(seqlens_list)
+
+    cu_seqlens = torch.tensor(
+        [0] + list(torch.cumsum(torch.tensor(seqlens_list), 0).tolist()),
+        dtype=torch.int32,
+        device=device,
+    )
+
+    x = torch.randn(total_tokens, dim, device=device, dtype=itype)
+    weight = torch.randn(dim, width, device=device, dtype=torch.float32)
+    bias = torch.randn(dim, device=device, dtype=torch.float32) if has_bias else None
+
+    activation = "silu" if silu_activation else None
+
+    out = causal_conv1d_varlen_fn(
+        x, weight, bias, cu_seqlens=cu_seqlens, activation=activation
+    )
+    out_ref = causal_conv1d_varlen_ref(
+        x, weight, bias, cu_seqlens=cu_seqlens, activation=activation
+    )
+
+    print(f"Forward max diff: {(out - out_ref).abs().max().item()}")
+    print(f"Forward mean diff: {(out - out_ref).abs().mean().item()}")
+    assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("itype", [torch.float32, torch.float16, torch.bfloat16])
+# @pytest.mark.parametrize('itype', [torch.float32])
+@pytest.mark.parametrize("silu_activation", [False, True])
+# @pytest.mark.parametrize('silu_activation', [False])
+@pytest.mark.parametrize("has_bias", [False, True])
+# @pytest.mark.parametrize('has_bias', [True])
+@pytest.mark.parametrize("width", [2, 3, 4])
+# @pytest.mark.parametrize('width', [4])
+@pytest.mark.parametrize("seqlen", [8, 16, 32, 64, 128, 256, 512, 1024])
+# @pytest.mark.parametrize('seqlen', [64])
+@pytest.mark.parametrize("dim", [64, 4096 + 32])
+# @pytest.mark.parametrize('dim', [64])
+def test_causal_conv1d_varlen_packed_bwd(
+    dim, seqlen, width, has_bias, silu_activation, itype
+):
+    """
+    Test backward pass of the packed varlen conv1d.
+    Compares gradients (dx, dweight, dbias) from causal_conv1d_varlen_fn
+    against those obtained by running causal_conv1d_ref on each segment individually.
+    """
+    device = "cuda"
+    rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
+    if itype == torch.bfloat16:
+        rtol, atol = 1e-2, 5e-2
+    rtolw, atolw = (1e-3, 1e-3)
+
+    torch.random.manual_seed(seqlen + dim + width)
+    batch = 5
+    # Generate random sequence lengths
+    seqlens_list = []
+    remaining = seqlen
+    for _ in range(batch - 1):
+        sl = torch.randint(
+            1, max(2, remaining - (batch - len(seqlens_list) - 1)), (1,)
+        ).item()
+        seqlens_list.append(sl)
+        remaining -= sl
+    seqlens_list.append(remaining)
+    assert all(s > 0 for s in seqlens_list)
+    total_tokens = sum(seqlens_list)
+
+    cu_seqlens = torch.tensor(
+        [0] + list(torch.cumsum(torch.tensor(seqlens_list), 0).tolist()),
+        dtype=torch.int32,
+        device=device,
+    )
+
+    # Create x with requires_grad
+    x = torch.randn(total_tokens, dim, device=device, dtype=itype, requires_grad=True)
+    weight = torch.randn(
+        dim, width, device=device, dtype=torch.float32, requires_grad=True
+    )
+    bias = (
+        torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
+        if has_bias
+        else None
+    )
+
+    # Create reference copies
+    x_ref = x.detach().clone().requires_grad_()
+    weight_ref = weight.detach().clone().requires_grad_()
+    bias_ref = bias.detach().clone().requires_grad_() if bias is not None else None
+
+    activation = "silu" if silu_activation else None
+
+    # Forward pass - Triton implementation
+    out = causal_conv1d_varlen_fn(
+        x, weight, bias, cu_seqlens=cu_seqlens, activation=activation
+    )
+
+    # Forward pass - reference (per-segment)
+    out_ref = causal_conv1d_varlen_ref(
+        x_ref, weight_ref, bias_ref, cu_seqlens=cu_seqlens, activation=activation
+    )
+
+    # Backward pass with the same gradient
+    g = torch.randn_like(out)
+    out.backward(g)
+    out_ref.backward(g)
+
+    print(f"dx max diff: {(x.grad - x_ref.grad).abs().max().item()}")
+    print(f"dweight max diff: {(weight.grad - weight_ref.grad).abs().max().item()}")
+    if has_bias:
+        print(f"dbias max diff: {(bias.grad - bias_ref.grad).abs().max().item()}")
+
+    assert torch.allclose(x.grad, x_ref.grad.to(dtype=itype), rtol=rtol, atol=atol), (
+        f"dx mismatch: max diff = {(x.grad - x_ref.grad.to(dtype=itype)).abs().max().item()}"
+    )
+    assert torch.allclose(weight.grad, weight_ref.grad, rtol=rtolw, atol=atolw), (
+        f"dweight mismatch: max diff = {(weight.grad - weight_ref.grad).abs().max().item()}"
+    )
+    if has_bias:
+        assert torch.allclose(bias.grad, bias_ref.grad, rtol=rtolw, atol=atolw), (
+            f"dbias mismatch: max diff = {(bias.grad - bias_ref.grad).abs().max().item()}"
+        )
+
+
+@pytest.mark.parametrize("itype", [torch.float32, torch.float16, torch.bfloat16])
+# @pytest.mark.parametrize('itype', [torch.float32])
+@pytest.mark.parametrize("silu_activation", [False, True])
+# @pytest.mark.parametrize('silu_activation', [False])
+@pytest.mark.parametrize("has_bias", [False, True])
+# @pytest.mark.parametrize('has_bias', [True])
+@pytest.mark.parametrize("width", [2, 3, 4])
+# @pytest.mark.parametrize('width', [4])
+@pytest.mark.parametrize("dim", [64, 4096 + 32])
+# @pytest.mark.parametrize('dim', [64])
+def test_causal_conv1d_varlen_packed_bwd_matches_individual_segments(
+    dim,
+    width,
+    has_bias,
+    silu_activation,
+    itype,
+):
+    """
+    Core gradient correctness test: run each segment independently through causal_conv1d_ref
+    to get per-segment gradients, and verify they match the varlen backward pass exactly.
+
+    This is the key test that confirms the varlen backward correctly isolates each segment.
+    """
+    device = "cuda"
+    rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
+    if itype == torch.bfloat16:
+        rtol, atol = 1e-2, 5e-2
+    rtolw, atolw = (1e-3, 1e-3)
+
+    torch.random.manual_seed(42 + dim + width)
+    # Use a mix of short and long segments to stress-test boundary handling
+    seqlens_list = [1, 3, 7, 15, 32, 2, 50, 4]
+    batch = len(seqlens_list)
+    total_tokens = sum(seqlens_list)
+
+    cu_seqlens = torch.tensor(
+        [0] + list(torch.cumsum(torch.tensor(seqlens_list), 0).tolist()),
+        dtype=torch.int32,
+        device=device,
+    )
+
+    x = torch.randn(total_tokens, dim, device=device, dtype=itype, requires_grad=True)
+    weight = torch.randn(
+        dim, width, device=device, dtype=torch.float32, requires_grad=True
+    )
+    bias = (
+        torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
+        if has_bias
+        else None
+    )
+
+    activation = "silu" if silu_activation else None
+
+    # --- Varlen backward ---
+    out = causal_conv1d_varlen_fn(
+        x, weight, bias, cu_seqlens=cu_seqlens, activation=activation
+    )
+    g = torch.randn_like(out)
+    out.backward(g)
+
+    dx_varlen = x.grad.clone()
+    dw_varlen = weight.grad.clone()
+    db_varlen = bias.grad.clone() if bias is not None else None
+
+    # --- Individual segments backward ---
+    # For each segment, create independent tensors and run causal_conv1d_ref
+    dx_ref = torch.zeros_like(x)
+    dw_ref = torch.zeros(dim, width, device=device, dtype=torch.float32)
+    db_ref = (
+        torch.zeros(dim, device=device, dtype=torch.float32)
+        if bias is not None
+        else None
+    )
+
+    for i in range(batch):
+        s = cu_seqlens[i].item()
+        e = cu_seqlens[i + 1].item()
+
+        # Detach and clone each segment
+        x_seg = (
+            x.detach()[s:e].T.unsqueeze(0).clone().requires_grad_()
+        )  # (1, dim, seg_len)
+        w_seg = weight.detach().clone().requires_grad_()
+        b_seg = bias.detach().clone().requires_grad_() if bias is not None else None
+
+        out_seg = causal_conv1d_ref(x_seg, w_seg, b_seg, activation=activation)
+        # Use the corresponding slice of g
+        g_seg = g[s:e].T.unsqueeze(0)
+        out_seg.backward(g_seg)
+
+        dx_ref[s:e] = x_seg.grad.squeeze(0).T.to(dtype=itype)
+        dw_ref += w_seg.grad
+        if bias is not None:
+            db_ref += b_seg.grad
+
+    print(f"dx max diff: {(dx_varlen - dx_ref).abs().max().item()}")
+    print(f"dweight max diff: {(dw_varlen - dw_ref).abs().max().item()}")
+    if has_bias:
+        print(f"dbias max diff: {(db_varlen - db_ref).abs().max().item()}")
+
+    assert torch.allclose(dx_varlen, dx_ref, rtol=rtol, atol=atol), (
+        f"dx segment mismatch: max diff = {(dx_varlen - dx_ref).abs().max().item()}"
+    )
+    assert torch.allclose(dw_varlen, dw_ref, rtol=rtolw, atol=atolw), (
+        f"dweight segment mismatch: max diff = {(dw_varlen - dw_ref).abs().max().item()}"
+    )
+    if has_bias:
+        assert torch.allclose(db_varlen, db_ref, rtol=rtolw, atol=atolw), (
+            f"dbias segment mismatch: max diff = {(db_varlen - db_ref).abs().max().item()}"
+        )
+
+
+@pytest.mark.parametrize("width", [2, 3, 4])
+def test_causal_conv1d_varlen_packed_single_token_segments(width):
+    """Test with segments of length 1 -- edge case for causal conv."""
+    device = "cuda"
+    dim = 64
+    itype = torch.float32
+    seqlens_list = [1, 1, 1, 1, 1]
+    total_tokens = sum(seqlens_list)
+
+    cu_seqlens = torch.tensor(
+        [0] + list(torch.cumsum(torch.tensor(seqlens_list), 0).tolist()),
+        dtype=torch.int32,
+        device=device,
+    )
+
+    torch.random.manual_seed(0)
+    x = torch.randn(total_tokens, dim, device=device, dtype=itype, requires_grad=True)
+    weight = torch.randn(
+        dim, width, device=device, dtype=torch.float32, requires_grad=True
+    )
+    bias = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
+
+    x_ref = x.detach().clone().requires_grad_()
+    weight_ref = weight.detach().clone().requires_grad_()
+    bias_ref = bias.detach().clone().requires_grad_()
+
+    out = causal_conv1d_varlen_fn(
+        x, weight, bias, cu_seqlens=cu_seqlens, activation=None
+    )
+    out_ref = causal_conv1d_varlen_ref(
+        x_ref, weight_ref, bias_ref, cu_seqlens=cu_seqlens, activation=None
+    )
+
+    assert torch.allclose(out, out_ref, rtol=1e-4, atol=1e-4), (
+        f"Forward mismatch for single-token segments: max diff = {(out - out_ref).abs().max().item()}"
+    )
+
+    # For single-token segments, out[t] = bias + weight[:, -1] * x[t]
+    # (only the last weight column applies since all earlier positions are zero-padded)
+    expected = x.detach() * weight.detach()[:, -1].unsqueeze(
+        0
+    ) + bias.detach().unsqueeze(0)
+    assert torch.allclose(out, expected.to(itype), rtol=1e-4, atol=1e-4), (
+        f"Single-token semantics mismatch: max diff = {(out - expected.to(itype)).abs().max().item()}"
+    )
+
+    g = torch.randn_like(out)
+    out.backward(g)
+    out_ref.backward(g)
+
+    assert torch.allclose(x.grad, x_ref.grad, rtol=1e-4, atol=1e-4)
+    assert torch.allclose(weight.grad, weight_ref.grad, rtol=1e-3, atol=1e-3)
+    assert torch.allclose(bias.grad, bias_ref.grad, rtol=1e-3, atol=1e-3)
