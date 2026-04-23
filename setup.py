@@ -132,8 +132,16 @@ ext_modules = []
 
 
 HIP_BUILD = bool(torch.version.hip)
+BUILD_CUDA_EXT = not SKIP_CUDA_BUILD and (HIP_BUILD or CUDA_HOME is not None)
 
-if not SKIP_CUDA_BUILD:
+if not SKIP_CUDA_BUILD and not BUILD_CUDA_EXT:
+    warnings.warn(
+        f"Neither CUDA nor HIP toolchain detected; skipping {PACKAGE_NAME} "
+        "compiled extension build. The Python package will install but "
+        "`import causal_conv1d_cuda` will fail at runtime."
+    )
+
+if BUILD_CUDA_EXT:
     print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
     TORCH_MAJOR = int(torch.__version__.split(".")[0])
     TORCH_MINOR = int(torch.__version__.split(".")[1])
@@ -162,16 +170,12 @@ if not SKIP_CUDA_BUILD:
         cc_flag.append("-DBUILD_PYTHON_PACKAGE")
 
     else:
-        check_if_cuda_home_none(PACKAGE_NAME)
-        # Check, if CUDA11 is installed for compute capability 8.0
-
-        if CUDA_HOME is not None:
-            _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-            if bare_metal_version < Version("11.6"):
-                raise RuntimeError(
-                    f"{PACKAGE_NAME} is only supported on CUDA 11.6 and above.  "
-                    "Note: make sure nvcc has a supported version by running nvcc -V."
-                )
+        _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
+        if bare_metal_version < Version("11.6"):
+            raise RuntimeError(
+                f"{PACKAGE_NAME} is only supported on CUDA 11.6 and above.  "
+                "Note: make sure nvcc has a supported version by running nvcc -V."
+            )
 
         cc_flag.append("-gencode")
         cc_flag.append("arch=compute_75,code=sm_75")
@@ -318,7 +322,7 @@ class CachedWheelsCommand(_bdist_wheel):
     """
 
     def run(self):
-        if FORCE_BUILD:
+        if FORCE_BUILD or not BUILD_CUDA_EXT:
             return super().run()
 
         wheel_url, wheel_filename = get_wheel_url()
