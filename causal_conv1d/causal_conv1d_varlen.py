@@ -189,20 +189,14 @@ def _seq_end_for_tokens(CU_SEQLENS, t, n_seqs, MAX_SEQS: tl.constexpr):
 
 
 def _fwd_configs():
-    configs = []
-    for BLOCK_T in [16, 32, 64, 128]:
-        for BLOCK_D in [64, 128, 256]:
-            for num_warps in [4, 8]:
-                configs.append(
-                    triton.Config(
-                        {"BLOCK_T": BLOCK_T, "BLOCK_D": BLOCK_D},
-                        num_warps=num_warps,
-                    )
-                )
-    return configs
+    # Memory-bound: only the token-tile size matters measurably.
+    return [
+        triton.Config({"BLOCK_T": block_t, "BLOCK_D": 128}, num_warps=4)
+        for block_t in [32, 64, 128]
+    ]
 
 
-@triton.autotune(configs=_fwd_configs(), key=["total_tokens", "dim"])
+@triton.autotune(configs=_fwd_configs(), key=["total_tokens_hint", "dim"])
 @triton.jit
 def _causal_conv1d_varlen_fwd_tiled_kernel(
     X,  # (total_tokens, dim)
@@ -211,6 +205,7 @@ def _causal_conv1d_varlen_fwd_tiled_kernel(
     CU_SEQLENS,  # (n_seqs + 1,) int32
     OUT,  # (total_tokens, dim)
     total_tokens,
+    total_tokens_hint,  # next_power_of_2(total_tokens); autotune key only
     dim,
     n_seqs,
     stride_x_tok,
@@ -296,22 +291,16 @@ def _causal_conv1d_varlen_fwd_tiled_kernel(
 
 
 def _bwd_configs():
-    configs = []
-    for BLOCK_T in [16, 32, 64, 128]:
-        for BLOCK_D in [64, 128, 256]:
-            for num_warps in [4, 8]:
-                configs.append(
-                    triton.Config(
-                        {"BLOCK_T": BLOCK_T, "BLOCK_D": BLOCK_D},
-                        num_warps=num_warps,
-                    )
-                )
-    return configs
+    # Memory-bound: only the token-tile size matters measurably.
+    return [
+        triton.Config({"BLOCK_T": block_t, "BLOCK_D": 128}, num_warps=4)
+        for block_t in [32, 64, 128]
+    ]
 
 
 @triton.autotune(
     configs=_bwd_configs(),
-    key=["total_tokens", "dim"],
+    key=["total_tokens_hint", "dim"],
     reset_to_zero=["DWEIGHT", "DBIAS"],
 )
 @triton.jit
@@ -325,6 +314,7 @@ def _causal_conv1d_varlen_bwd_tiled_kernel(
     DWEIGHT,  # (dim, width) float32 -- output, atomic adds
     DBIAS,  # (dim,) float32 or placeholder -- output, atomic adds
     total_tokens,
+    total_tokens_hint,  # next_power_of_2(total_tokens); autotune key only
     dim,
     n_seqs,
     stride_x_tok,
@@ -576,6 +566,7 @@ class CausalConv1dVarlenFn(torch.autograd.Function):
                 cu_seqlens,
                 out,
                 total_tokens,
+                triton.next_power_of_2(total_tokens),
                 dim,
                 n_seqs,
                 x.stride(0),
@@ -638,6 +629,7 @@ class CausalConv1dVarlenFn(torch.autograd.Function):
                 dweight,
                 dbias if dbias is not None else dweight,  # placeholder
                 total_tokens,
+                triton.next_power_of_2(total_tokens),
                 dim,
                 n_seqs,
                 x.stride(0),
